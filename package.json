@@ -1,15 +1,15 @@
 {
-  "name": "dsh-opencode-zen",
+  "name": "dsh-opencode-free",
   "version": "0.1.0",
   "type": "module",
-  "description": "星桥模式：OpenCode Zen 免费模型路线的前缀稳定与载荷控制 Agent 预设",
+  "description": "星桥模式：OpenCode 免费模型路线的前缀稳定与载荷控制 Agent 预设",
   "keywords": [
     "deepseek-harness",
     "dsh",
     "dsh-plugin",
     "agent-preset",
     "opencode",
-    "opencode-zen",
+    "opencode-free",
     "xdbridge",
     "prefix-cache"
   ],
@@ -22,11 +22,11 @@
   ],
   "meta": {
     "title": "星桥模式",
-    "description": "OpenCode Zen 免费模型路线（经 dsh-opencode-xdbridge）的前缀稳定预设。这条路线不花钱，硬约束是速率限制、每轮延迟与 8 MB 请求体上限：工具目录全程固定、历史只追加、载荷尽量小、压缩尽量不触发。"
+    "description": "OpenCode 免费模型路线（经 dsh-opencode-xdbridge）的前缀稳定预设。这条路线不花钱，硬约束是速率限制、每轮延迟与 8 MB 请求体上限：工具目录全程固定、历史只追加、载荷尽量小、压缩尽量不触发。"
   },
   "dsh": {
     "bundle": {
-      "patch": "./presets/opencode-zen.patch.yml"
+      "patch": "./presets/opencode-free.patch.yml"
     }
   }
 }

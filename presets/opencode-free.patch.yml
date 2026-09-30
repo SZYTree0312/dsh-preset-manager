@@ -1,15 +1,15 @@
-# Agent preset `opencode-zen`: one `@deepseek-ai/dsh-agent-preset` declaration
+# Agent preset `opencode-free`: one `@deepseek-ai/dsh-agent-preset` declaration
 # inserted after the web patch. Derived from the upstream `standard` preset
 # (packages/bundle/web-app/presets/standard.patch.yml @ 0.2.0-rc.2) and from
 # `presets/bailian-gold.patch.yml` in the sibling repo.
 #
-# Target route: OpenCode Zen's free models, reached through the community plugin
+# Target route: OpenCode's free models, reached through the community plugin
 # `dsh-opencode-xdbridge` (XDTrees). Bridge shape, verified in that plugin's
 # source:
 #
 #   DSH → pi-ai provider "opencode-xdbridge" → shim (127.0.0.1, OpenAI-shaped)
 #       → backend (fresh POST /session per turn, permission interception)
-#       → isolated `opencode serve` → OpenCode Zen
+#       → isolated `opencode serve` → OpenCode 免费模型（上游）
 #
 # What that means for this preset, and where it diverges from bailian-gold:
 #
@@ -50,13 +50,13 @@
 #   d. Payload kept small: tighter `tool-fs` read caps, an aggressive pruner,
 #      and a discipline that pushes long output into files.
 - insert:
-    - id: preset-opencode-zen
+    - id: preset-opencode-free
       name: '@deepseek-ai/dsh-agent-preset'
       config:
-        id: opencode-zen
+        id: opencode-free
         name: 星桥模式
         description: >-
-          OpenCode Zen 免费模型路线（经 dsh-opencode-xdbridge）的前缀稳定预设。
+          OpenCode 免费模型路线（经 dsh-opencode-xdbridge）的前缀稳定预设。
           这条路线不花钱，硬约束是免费额度的速率限制、每轮延迟与 8 MB 请求体上限。
           工具目录全程固定、历史只追加、载荷尽量小、压缩尽量不触发。
         order: 11
@@ -72,7 +72,7 @@
               # 每轮重算整段对话，而沙箱仍由 harness 强制执行。
               includeRuntimeContext: false
               prefix: |-
-                你在「星桥模式」下工作。模型走 OpenCode Zen 的免费额度，不花钱 ——
+                你在「星桥模式」下工作。模型走 OpenCode 的免费额度，不花钱 ——
                 真正的硬约束是速率限制、每轮延迟，以及 8 MB 的请求体上限。
                 整段对话每回合都要重新发一次，所以：
                 - 先查后写。用搜索精确定位，再用 read 的 offset/limit 只读需要的片段；不要整文件通读，不要重复读同一文件。
@@ -165,7 +165,7 @@
                   retainRatio: 0.25
                   # headroomTokens 从上游默认的 65536 降到 32768。
                   # 它是从触发预算里**扣除**的余量（调小 → 触发点抬高 → 压缩更晚），
-                  # 而免费的 Zen 模型窗口往往不大：窗口 128000、输出预留 32768 时，
+                  # 而免费模型窗口往往不大：窗口 128000、输出预留 32768 时，
                   # 65536 的余量会把触发点压到 30464 —— 几乎一上来就压。
                   # 降到 32768 后触发点约 63232，才谈得上「尽量不压缩」。
                   headroomTokens: 32768

@@ -21,7 +21,7 @@ lib/backend.js  每回合 POST /session（**新建会话**）
    ▼
 lib/runtime.js  隔离的 opencode serve（独立 XDG 根 + 随机密码）
    ▼
-OpenCode Zen 免费模型
+OpenCode 免费模型
 ```
 
 ## 2. 每回合都新建一个上游会话

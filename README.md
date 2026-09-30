@@ -1,17 +1,21 @@
-# 星桥模式（opencode-zen）
+# 星桥模式（opencode-free）
 
 挂在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）上的
-agent preset，为 **OpenCode Zen 的免费模型**这条路线做前缀稳定与载荷控制。
+agent preset，为 **OpenCode 的免费模型**这条路线做前缀稳定与载荷控制。
 不是独立运行时、不是 fork。
 
 前置依赖：社区插件 [`dsh-opencode-xdbridge`](https://github.com/XDTrees/dsh-opencode-xdbridge)
-（XDTrees）。它把 OpenCode Zen 的免费模型通过隔离的 opencode 运行时接进 dsh，
+（XDTrees）。它把 OpenCode 的免费模型通过隔离的 opencode 运行时接进 dsh，
 注册成 provider `opencode-xdbridge`。**本 preset 只做 agent 侧的行为策略，不替代那个插件。**
 
 上游基线：`0.2.0-rc.2`（必须 pin，上游明示会有破坏性变更）。
 
-名字从「星」与「桥」：星是 OpenCode Zen 那批免费模型（space-bunny、big-pickle…），
+名字从「星」与「桥」：星是那批免费模型（space-bunny、big-pickle…），
 桥是 xdbridge 这座桥。
+
+> **为什么 id 是 `opencode-free` 而不是 `opencode-zen`：**
+> Zen 是对方的**订阅套餐**名，拿别人的产品名当自己 preset 的名字不合适。
+> 这里的 `free` 指的是走的免费额度路线，与套餐无关 —— 本 preset 也不要求你订阅任何东西。
 
 ## 最重要的一件事：这条路线不省钱
 
@@ -70,7 +74,7 @@ const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 |---|---|---|---|
 | `agent-instructions.maxBytes` | 131072（比上游 65536 加倍）| **32768**（比上游减半）| 那边常驻内容吃缓存价，便宜；这里每字节都在每轮重发的数据块里 |
 | `tool-result-pruner` | 8192/4096/1024（上游默认）| **4096/2048/512** | 这里多一条硬闸：8 MB 请求体上限 |
-| `compaction.headroomTokens` | 不动（65536）| **32768** | 免费 Zen 模型窗口常只有 128K，65536 的余量会把触发点压到 30464 |
+| `compaction.headroomTokens` | 不动（65536）| **32768** | 免费模型窗口常只有 128K，65536 的余量会把触发点压到 30464 |
 | `summarizationModel` | 钉 `qwen3.8-flash` | **留空** | 免费名单随时轮换，钉死 id 会在模型撤下那天让压缩失败 |
 | `modelPolicies` | 按模型覆盖 | **留空** | 同上，按 id 精确覆盖是定时炸弹 |
 | `tool-fs` 读上限 | 不设 | **收紧到 800 行 / 1000 字符 / 24 KiB** | 这里载荷是真金白银的约束 |
@@ -80,7 +84,7 @@ const NO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 ## 目录
 
 ```
-presets/opencode-zen.patch.yml            preset 定义，主产物
+presets/opencode-free.patch.yml            preset 定义，主产物
 docs/how-the-bridge-shapes-the-request.md 源码级证据：桥怎么组装请求
 ```
 
@@ -93,7 +97,7 @@ docs/how-the-bridge-shapes-the-request.md 源码级证据：桥怎么组装请�
 | 部分 | 层级 | 作者 | 管什么 |
 |---|---|---|---|
 | `dsh-opencode-xdbridge` | Host（provider）| XDTrees | provider 注册、模型目录、隔离运行时、8 MB 上限 |
-| 本 preset（`dsh-opencode-zen`）| Agent | 本仓库 | 工具面、提示词、压缩策略、载荷控制 |
+| 本 preset（`dsh-opencode-free`）| Agent | 本仓库 | 工具面、提示词、压缩策略、载荷控制 |
 
 **为什么不打包进去：**
 
@@ -101,7 +105,7 @@ docs/how-the-bridge-shapes-the-request.md 源码级证据：桥怎么组装请�
 2. **打包就等于钉死版本。** 桥接插件依赖 OpenCode 的客户端接口（不是官方开放 API），
    OpenCode 一更新它就可能要跟着改。装成独立插件，更新由上游直接推给你；
    打进本仓库，就得等我发新版 —— 那才是真的跟不上。
-3. **写进 patch 会出事。** 在 `presets/opencode-zen.patch.yml` 里加一行
+3. **写进 patch 会出事。** 在 `presets/opencode-free.patch.yml` 里加一行
    `- id: llm-opencode-xdbridge` 去注册 provider，等于引用一个可能没安装的包，
    加载期直接失败，可能连累整个 profile。**别这么干。**
 
@@ -137,13 +141,13 @@ dsh plugin --profile web add github:XDTrees/dsh-opencode-xdbridge
 再装本 preset：
 
 ```bash
-dsh plugin --profile web add github:SZYTree0312/dsh-opencode-zen
+dsh plugin --profile web add github:SZYTree0312/dsh-opencode-free
 ```
 
 装完后在会话预设选择器里选 **星桥模式**。卸载：
 
 ```bash
-dsh plugin --profile web remove dsh-opencode-zen
+dsh plugin --profile web remove dsh-opencode-free
 ```
 
 > 插件的 peer 范围写的是 `dsh >=0.1.1-rc.1 <0.2.0`，而本 preset 按 `0.2.0-rc.2`

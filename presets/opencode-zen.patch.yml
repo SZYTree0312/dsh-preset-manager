@@ -1,0 +1,270 @@
+# Agent preset `opencode-zen`: one `@deepseek-ai/dsh-agent-preset` declaration
+# inserted after the web patch. Derived from the upstream `standard` preset
+# (packages/bundle/web-app/presets/standard.patch.yml @ 0.2.0-rc.2) and from
+# `presets/bailian-gold.patch.yml` in the sibling repo.
+#
+# Target route: OpenCode Zen's free models, reached through the community plugin
+# `dsh-opencode-xdbridge` (XDTrees). Bridge shape, verified in that plugin's
+# source:
+#
+#   DSH → pi-ai provider "opencode-xdbridge" → shim (127.0.0.1, OpenAI-shaped)
+#       → backend (fresh POST /session per turn, permission interception)
+#       → isolated `opencode serve` → OpenCode Zen
+#
+# What that means for this preset, and where it diverges from bailian-gold:
+#
+#   0. **Money is not the lever here.** The bridge hard-codes
+#      `cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }`. The free
+#      tier is the constraint — rate limits, per-turn latency, and a hard
+#      **8 MB request-body cap** on the shim. So the governing goal is
+#      "send fewer bytes, send fewer requests, keep the prefix identical".
+#   1. **Every turn is a brand-new upstream session.** `backend.js` does
+#      `POST /session` per turn, so no server-side state carries over: the whole
+#      conversation is re-sent every turn. The growing JSON blob is the payload.
+#   2. **A cache does exist.** `protocol.js` reports it back as
+#      `prompt_tokens_details.cached_tokens = tokens.cache.read`, so the same
+#      prefix-stability discipline still pays — in latency and quota, not cash.
+#   3. **The tool catalog is literally inside the system string.**
+#      `protocol.js` builds `system` as a fixed instruction block plus
+#      `Available external tools: ${JSON.stringify(tools.map(t => t.function))}`.
+#      Change the tool set — or its ORDER — and the system text changes, which
+#      invalidates the cached prefix. This is a mechanical proof of the rule
+#      bailian-gold only had upstream's word for.
+#   4. **`tool_choice` and `parallel_tool_calls` also land in that string** (the
+#      trailing instruction lines depend on them), so a harness that flips them
+#      turn-to-turn pays the same price. Nothing here can force them constant;
+#      the discipline is to avoid the modes that flip them.
+#   5. **The user's system prompt rides inside the conversation JSON**, as
+#      `messages[0]`, i.e. at the very front of the re-sent blob. Anything
+#      dynamic there breaks the prefix from byte zero — hence
+#      `includeRuntimeContext: false`.
+#
+# Concretely:
+#
+#   a. Tool catalog fixed for the whole session; never narrow it, extend it, or
+#      reorder it. (`tool-plugin-manager` stays disabled for exactly this
+#      reason — it is the one component that can add tools mid-session.)
+#   b. History is append-only. Compaction replaces a span in place and never
+#      reaches surface node 0.
+#   c. Dynamic state appended at the tail, never injected into the head.
+#   d. Payload kept small: tighter `tool-fs` read caps, an aggressive pruner,
+#      and a discipline that pushes long output into files.
+- insert:
+    - id: preset-opencode-zen
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: opencode-zen
+        name: 星桥模式
+        description: >-
+          OpenCode Zen 免费模型路线（经 dsh-opencode-xdbridge）的前缀稳定预设。
+          这条路线不花钱，硬约束是免费额度的速率限制、每轮延迟与 8 MB 请求体上限。
+          工具目录全程固定、历史只追加、载荷尽量小、压缩尽量不触发。
+        order: 11
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              # 关闭动态 runtime-context 注入。它落进系统提示，而本路线的系统提示
+              # 作为 messages[0] 被 JSON.stringify 进每轮重发的数据块 —— 位于最前端。
+              # 一旦变化，缓存前缀从字节 0 开始失效。
+              # 代价同百炼成金模式：该开关全有或全无，会一并抑制 sandbox /
+              # approval / delegation 的策略提示。这里仍然值得 —— 前缀失效的代价是
+              # 每轮重算整段对话，而沙箱仍由 harness 强制执行。
+              includeRuntimeContext: false
+              prefix: |-
+                你在「星桥模式」下工作。模型走 OpenCode Zen 的免费额度，不花钱 ——
+                真正的硬约束是速率限制、每轮延迟，以及 8 MB 的请求体上限。
+                整段对话每回合都要重新发一次，所以：
+                - 先查后写。用搜索精确定位，再用 read 的 offset/limit 只读需要的片段；不要整文件通读，不要重复读同一文件。
+                - 互不依赖的工具调用在同一回合并行发起 —— 每多一回合就多消耗一次免费额度。有依赖关系的必须分批。
+                - 长输出重定向到文件或后台作业，只读回需要的行。
+                - 最终答复只给结论、改动位置与验证结果；不写过程旁白，不复述已知信息，不粘贴大段代码。
+                - 只做被要求的事：不自作主张扩大范围，不生成未被要求的文件。
+                事实靠检查获得，不要问用户；只有用户才能决定的选择才用 ask_user_question。
+              suffix: |-
+                你是由 {{model}} 驱动的编码 agent。工作目录：{{cwd}}。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              # 上游 standard 是 65536，百炼成金模式抬到 131072。这里反过来压到 32768：
+              # AGENTS.md 的内容是被 JSON.stringify 进每轮重发的数据块的，
+              # 每一个字节都会在后续每一轮里重复出现。本路线没有「缓存价很便宜」
+              # 这条退路 —— 载荷就是延迟，也是 8 MB 上限的消耗。
+              maxBytes: 32768
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              # 上游默认 2000 行 / 2000 字符每行 / 50 KiB。这里三档都收紧。
+              # 理由不是省钱（这条路线不花钱），是载荷：单次 read 的结果会原样
+              # 进入每轮重发的数据块，直到被压缩裁掉。
+              # 收得太狠会逼模型分块重读 —— 那是要多花回合的，而回合数是免费
+              # 额度的直接消耗。所以只收到「够用偏紧」，不照搬激进值；
+              # 想再压可以往 500 / 800 / 16384 走，先跑几次真实会话看看会不会
+              # 明显多出重读。
+              readLimit: 800
+              readMaxLineLength: 1000
+              readMaxBytes: 24576
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                    Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                    The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                    Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                    Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                    When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              # Compaction is the one operation that both rewrites the prefix and
+              # costs an extra request against a rate-limited free quota. Push it
+              # away, and make it cheap when it finally happens.
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  # thresholdRatio / retainRatio 都是比例 —— 必须如此，因为本路线的
+                  # 窗口是**每个模型自己的**（bridge 如实上报，缺省回落 128000，
+                  # 部分模型到 1M）。写绝对数值会直接算错。
+                  thresholdRatio: 0.9
+                  retainRatio: 0.25
+                  # headroomTokens 从上游默认的 65536 降到 32768。
+                  # 它是从触发预算里**扣除**的余量（调小 → 触发点抬高 → 压缩更晚），
+                  # 而免费的 Zen 模型窗口往往不大：窗口 128000、输出预留 32768 时，
+                  # 65536 的余量会把触发点压到 30464 —— 几乎一上来就压。
+                  # 降到 32768 后触发点约 63232，才谈得上「尽量不压缩」。
+                  headroomTokens: 32768
+                  # 不写 summarizationProvider / summarizationModel。
+                  # 免费模型清单**每次启动都重读、随时可能轮换**，钉死某个 id
+                  # 会在它被撤下那天直接让压缩失败。留空即用当前路由的模型。
+                  # 同理 modelPolicies 也留空 —— 按 id 精确覆盖在这条路线上是定时炸弹。
+                  modelPolicies: []
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  # 比上游默认（8192/4096/1024）更激进。两个理由：
+                  #   1. 载荷。工具结果住进每轮重发的数据块，shim 的请求体上限 8 MB
+                  #      是硬闸 —— 超了就是失败，不是变慢。
+                  #   2. 免费额度。裁剪不发模型调用；裁到压力线之下就能跳过摘要生成，
+                  #      而摘要要按全量重读历史再生成 —— 那是一次实打实的额外请求。
+                  #
+                  # ⚠️ 但它**不是每轮跑的**：上游 README 明写「Below pressure nothing
+                  # is trimmed」，它只在压缩压力确认后才由 compaction-basic 调用。
+                  # 所以它是压缩期的减压阀，不是「每轮把工具结果变小」的开关 ——
+                  # 每轮的载荷控制靠上面的 tool-fs 上限和提示词纪律。
+                  thresholdChars: 4096
+                  headChars: 2048
+                  tailChars: 512
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              # ⚠️ 子代理会成倍增加请求数，而请求数是免费额度的直接消耗。
+              # 这里保留（能力优先），但如果你开始撞限流，第一批该关的就是
+              # tool-subagent / tool-subagent-fork / workflow-ptc / tool-workflow。
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+                  backgroundMode: continuable
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+              - id: tool-subagent-codex
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: codex
+                  toolName: subagent_codex
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: tool-subagent-claude-code
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: claude-code
+                  toolName: subagent_claude_code
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                disabled: true
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              # 网页抓取会把整页内容塞进对话 —— 那是每轮重发的数据块里最大的
+              # 单块来源之一。保留（能力优先），撞 8 MB 上限时第一个关它：
+              # fetch: false 只关抓取，搜索还在。
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+          - id: tool-plugin-manager
+            name: '@deepseek-ai/dsh-plugin-manager/tools'
+            # 这条**必须**保持 disabled。它是唯一能在会话中途增删工具的组件，
+            # 而本路线的工具目录被 JSON.stringify 写进 system 字符串 ——
+            # 增删一个工具，system 就变，缓存前缀立刻失效，且是那种看不见的失效。
+            disabled: true

@@ -86,12 +86,49 @@ docs/how-the-bridge-shapes-the-request.md 源码级证据：桥怎么组装请�
 
 ## 接入
 
-| 部分 | 层级 | 管什么 |
-|---|---|---|
-| `dsh-opencode-xdbridge` 插件 | Host | provider、模型目录、隔离运行时 |
-| `presets/opencode-zen.patch.yml` | Agent（preset）| 工具面、提示词、压缩策略 |
+### 本 preset 不含 xdbridge，也不会替你装它
 
-先装插件：
+两个包是**分开的**，各有各的作者：
+
+| 部分 | 层级 | 作者 | 管什么 |
+|---|---|---|---|
+| `dsh-opencode-xdbridge` | Host（provider）| XDTrees | provider 注册、模型目录、隔离运行时、8 MB 上限 |
+| 本 preset（`dsh-opencode-zen`）| Agent | 本仓库 | 工具面、提示词、压缩策略、载荷控制 |
+
+**为什么不打包进去：**
+
+1. **不替别人分发代码。** 那是 XDTrees 的项目，MIT 也不该由我这边再发一份。
+2. **打包就等于钉死版本。** 桥接插件依赖 OpenCode 的客户端接口（不是官方开放 API），
+   OpenCode 一更新它就可能要跟着改。装成独立插件，更新由上游直接推给你；
+   打进本仓库，就得等我发新版 —— 那才是真的跟不上。
+3. **写进 patch 会出事。** 在 `presets/opencode-zen.patch.yml` 里加一行
+   `- id: llm-opencode-xdbridge` 去注册 provider，等于引用一个可能没安装的包，
+   加载期直接失败，可能连累整个 profile。**别这么干。**
+
+**反过来也是安全的：** 本 preset 的 YAML 里**没有一行引用 `opencode-xdbridge`**
+（全文件搜 `opencode` 只出现在注释、preset id 和描述里，插件 `name:` 全是
+`@deepseek-ai/*`）。所以：
+
+- 没装桥接插件也能装本 preset —— 只是选不到那些模型，不会报错、不会拖垮 profile。
+- 本 preset 的调参思路（载荷要小、前缀要稳、压缩要晚）对任何「按上下文线性付费、
+  且每轮重发整段对话」的路线都成立，换 provider 也能用，只是数值要重新看。
+
+### ⚠️ 本 preset 的结论会随桥的实现变化
+
+上面每一条非常规设定都对应 `dsh-opencode-xdbridge` **v0.1.0 源码里的具体一行**
+（见 [`docs/how-the-bridge-shapes-the-request.md`](docs/how-the-bridge-shapes-the-request.md)）。
+如果上游改了任意一处，对应的设定就该重新看：
+
+| 若上游改了 | 需要复查 |
+|---|---|
+| `protocol.js` 的 system 组装（尤其工具目录那段）| 「工具目录必须固定」这条还在不在 |
+| `backend.js` 的会话策略（不再每回合新建）| 载荷是否还线性增长、8 MB 上限还构不构成威胁 |
+| `adapter.js` 的 `NO_COST` / 窗口上报 | 压缩参数与 `modelPolicies` 留空的理由 |
+| shim 的请求体上限 | `tool-fs` 读上限与裁剪阈值的激进程度 |
+
+### 安装
+
+先装插件（上游的）：
 
 ```bash
 dsh plugin --profile web add github:XDTrees/dsh-opencode-xdbridge

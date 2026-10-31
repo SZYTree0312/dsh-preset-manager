@@ -2,7 +2,7 @@
 
 DSH（DeepSeek Harness）插件：把当前 profile 里的 **Agent preset** 列出来，并且能在**对话内**把正在进行的会话切到另一个 preset。
 
-> 本仓前身是 `dsh-opencode-free`（星桥模式），那条线已废弃，见 [DISCARD.md](DISCARD.md)。
+> 本仓前身是 `dsh-opencode-free`（星桥模式 preset），那条线已废弃、原仓库已删除；旧实现只留在 git 历史里（最后一次提交 `50ed5c1`）。
 
 ## 为什么需要它
 

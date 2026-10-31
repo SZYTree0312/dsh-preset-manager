@@ -1,7 +1,7 @@
 {
   "name": "dsh-preset-manager",
-  "version": "0.1.0",
-  "description": "DeepSeek Harness plugin: list the profile's agent presets and switch a running conversation to another one. | DSH 插件：列出 profile 的 Agent preset，并在对话内切换当前会话的 preset。",
+  "version": "0.1.8",
+  "description": "DeepSeek Harness plugin: switch a running conversation's agent preset from a session-header menu or a slash command, with a cache-preserving soft mode. | DSH 插件：在会话头部菜单或斜杠命令里切换 preset，并提供保留 prompt 与前缀缓存的柔切。",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -15,6 +15,7 @@
   "type": "module",
   "main": "./index.js",
   "exports": {
+    "./client": "./client.js",
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
@@ -22,6 +23,7 @@
   },
   "files": [
     "index.js",
+    "client.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
@@ -31,13 +33,20 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
   },
   "engines": {
     "node": "^22.15.0 || >=24.0.0"
   },
   "scripts": {
-    "check": "node --check index.js",
+    "check": "node --check index.js && node --check client.js",
     "test": "node test/plugin.test.mjs"
   }
 }

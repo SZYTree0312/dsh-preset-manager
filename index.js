@@ -53,7 +53,7 @@ const DEFAULT_OPTIONS = Object.freeze({
 
 const COMMAND_NAME = /^[a-z][a-z0-9_-]*$/u
 
-const COMMAND_DESCRIPTION = '列出本 profile 的 Agent preset，或把当前对话切换到另一个 preset'
+const COMMAND_DESCRIPTION = '列出本 profile 的 Agent preset，把当前对话切换过去，或在不动 prompt 的前提下柔切'
 
 const LIST_TOOL_DESCRIPTION = 'List the Agent presets installed in this Harness profile. '
   + 'Each row carries the exact id to pass to preset_switch, the display name, the declared order, '
@@ -61,12 +61,18 @@ const LIST_TOOL_DESCRIPTION = 'List the Agent presets installed in this Harness 
   + '`current` is the preset this conversation runs; `default` is the one new sessions start with. '
   + 'Call this before preset_switch so the id is exact.'
 
-const SWITCH_TOOL_DESCRIPTION = 'Switch this conversation to another Agent preset, which changes the '
-  + 'prompt, tools, and skills available from the next step. '
+const SWITCH_TOOL_DESCRIPTION = 'Switch this conversation to another Agent preset. '
+  + 'mode "hard" (default) rebinds the composition, which changes the prompt, tools, and skills from the '
+  + 'next step and starts a new prompt prefix, so provider prefix caching is lost. '
+  + 'mode "soft" keeps the composition, the tool set, and the prefix cache, and appends the target '
+  + 'preset\'s declared prompt text as one note instead; it is an approximation, not an equal switch. '
   + 'The switch is recorded in the session log and applies immediately: the current turn continues, '
   + 'and the next model step assembles the new composition. '
-  + 'Use preset_list first for exact ids; switching to the current preset is a no-op. '
-  + 'The whole prompt prefix changes, so do not switch back and forth without a reason.'
+  + 'Use preset_list first for exact ids and preset_diff to see the cost; hard-switching to the current preset is a no-op.'
+
+const DIFF_TOOL_DESCRIPTION = 'Compare a preset against the one this conversation runs, without switching. '
+  + 'Reports the declared plugin rows that would be added, removed, or changed, and whether the request '
+  + 'prefix would stay identical (cacheSafe). Use it before a hard switch to show the cost.'
 
 /**
  * Validate the row config. The plugin declares no schemastery `Config` (which
@@ -226,7 +232,8 @@ function formatRoster(roster, current, fallback) {
 }
 
 /**
- * Drive `/preset`: no input lists the roster, `<id>` switches the conversation.
+ * Drive `/preset`: no input lists the roster, `<id>` rebinds, `soft <id>`
+ * appends the preset's prompt text instead, `diff <id>` reports the cost.
  * @param ctx - the plugin context.
  * @param options - normalized plugin options.
  * @param invocation - the command invocation supplied by the registry.
@@ -239,17 +246,34 @@ async function runCommand(ctx, options, invocation) {
     const roster = await registry.list()
     const current = currentPresetOf(registry, invocation.agent)
     const fallback = defaultPresetOf(registry)
-    if (raw === '' || raw === 'list') {
+    const [head, ...rest] = raw === '' ? [] : raw.split(/\s+/u)
+    if (head === undefined || head === 'list') {
       return { kind: 'success', text: formatRoster(roster, current, fallback) }
     }
-    const [presetId] = raw.split(/\s+/u)
+    const known = (presetId) => {
+      if (roster.some((row) => row.id === presetId)) return presetId
+      throw new Error(`未知 preset "${presetId}"；可用：${roster.map((row) => row.id).join(', ')}`)
+    }
+    if (head === 'diff' || head === 'soft') {
+      const [presetId] = rest
+      if (presetId === undefined) return { kind: 'error', text: `用法：/${options.command} ${head} <preset id>` }
+      known(presetId)
+      if (turnIsOpen(ctx, invocation.agent?.session) && options.allowWhileBusy !== true) {
+        return { kind: 'error', text: `当前回合还在运行，结束后再操作 "${presetId}"（或把 dsh-preset-manager 的 allowWhileBusy 设为 true）。` }
+      }
+      if (head === 'diff') {
+        return { kind: 'success', text: formatDiff(await diffPresets(ctx, current, presetId, roster)) }
+      }
+      const done = await softSwitch(ctx, invocation.agent, presetId, roster)
+      return { kind: 'success', text: `已柔切到 "${done.preset}"：追加了 ${done.length} 字人设说明，prompt 与工具集未改动，缓存保留。` }
+    }
     if (turnIsOpen(ctx, invocation.agent?.session) && options.allowWhileBusy !== true) {
       return {
         kind: 'error',
-        text: `当前回合还在运行，结束后再切换到 "${presetId}"（或把 dsh-preset-manager 的 allowWhileBusy 设为 true）。`,
+        text: `当前回合还在运行，结束后再切换到 "${head}"（或把 dsh-preset-manager 的 allowWhileBusy 设为 true）。`,
       }
     }
-    const result = await switchPreset(ctx, invocation.agent, presetId)
+    const result = await switchPreset(ctx, invocation.agent, head)
     if (!result.changed) return { kind: 'success', text: `当前对话已经在 "${result.to}"。` }
     const moved = result.from === undefined ? `已切换到 "${result.to}"` : `已从 "${result.from}" 切换到 "${result.to}"`
     return { kind: 'success', text: `${moved}，下一步生效。` }
@@ -257,6 +281,230 @@ async function runCommand(ctx, options, invocation) {
   catch (error) {
     return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
   }
+}
+
+/** Modules whose row carries prompt text we can re-issue as an injected note. */
+const PROMPT_ROW_MODULES = new Set(['@deepseek-ai/dsh-persona'])
+
+/**
+ * Read a preset's declared plugin rows as the Loader's own YAML.
+ * @param registry - the `agentPresets` service.
+ * @param presetId - the preset to read.
+ * @returns the YAML text, or an empty string when this build cannot read it.
+ */
+async function readPresetDocument(registry, presetId) {
+  if (typeof registry.readDocument !== 'function') return ''
+  const document = await registry.readDocument(presetId)
+  return typeof document?.content === 'string' ? document.content : ''
+}
+
+/**
+ * Strip one layer of YAML quoting.
+ * @param raw - the scalar as written.
+ * @returns the unquoted value.
+ */
+function stripQuotes(raw) {
+  const text = String(raw).trim()
+  if (text.length >= 2 && (text[0] === '\'' || text[0] === '"') && text.at(-1) === text[0]) return text.slice(1, -1)
+  return text
+}
+
+/**
+ * Split a dumped entry list into its top-level rows.
+ * @param yamlText - output of `readDocument`.
+ * @returns one record per row, with the row's own text kept for comparison.
+ */
+function splitRows(yamlText) {
+  const rows = []
+  let current
+  for (const line of String(yamlText).split(/\r?\n/)) {
+    if (/^-\s/u.test(line)) {
+      current = [line]
+      rows.push(current)
+      continue
+    }
+    if (current !== undefined) current.push(line)
+  }
+  return rows.map((block) => {
+    const text = block.join('\n')
+    const id = /^-\s*id:\s*(.+)$/mu.exec(block[0])
+    const name = /^\s{2}name:\s*(.+)$/mu.exec(text)
+    return {
+      ...id === null ? {} : { id: stripQuotes(id[1]) },
+      ...name === null ? {} : { name: stripQuotes(name[1]) },
+      text,
+    }
+  })
+}
+
+/**
+ * Compare two dumped rows lists, ignoring trailing whitespace noise.
+ * @param fromRows - rows of the preset being left.
+ * @param toRows - rows of the preset being entered.
+ * @returns added, removed and changed rows.
+ */
+function diffRows(fromRows, toRows) {
+  const keyOf = (row) => `${row.id ?? ''}\u0000${row.name ?? ''}`
+  const normalize = (row) => row.text.replace(/[ \t]+$/gmu, '').trim()
+  const from = new Map(fromRows.map((row) => [keyOf(row), row]))
+  const to = new Map(toRows.map((row) => [keyOf(row), row]))
+  return {
+    added: [...to].filter(([key]) => !from.has(key)).map(([, row]) => row),
+    removed: [...from].filter(([key]) => !to.has(key)).map(([, row]) => row),
+    changed: [...to]
+      .filter(([key, row]) => from.has(key) && normalize(from.get(key)) !== normalize(row))
+      .map(([, row]) => row),
+  }
+}
+
+/**
+ * Read one block scalar (`key: |-`) out of a row's YAML text.
+ * @param rowText - the row as written.
+ * @param key - the mapping key holding the block.
+ * @returns the block's text, or undefined when the key is absent.
+ */
+function blockScalar(rowText, key) {
+  const lines = String(rowText).split(/\r?\n/u)
+  const pattern = new RegExp(`^(\\s*)${key}:\\s*([|>])[-+]?\\s*$`, 'u')
+  const start = lines.findIndex((line) => pattern.test(line))
+  if (start === -1) return undefined
+  const folded = pattern.exec(lines[start])[2] === '>'
+  const keyIndent = pattern.exec(lines[start])[1].length
+  const collected = []
+  let indent
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (line.trim() === '') {
+      collected.push('')
+      continue
+    }
+    const lineIndent = /^\s*/u.exec(line)[0].length
+    if (lineIndent <= keyIndent) break
+    if (indent === undefined) indent = lineIndent
+    collected.push(line.slice(indent))
+  }
+  const text = folded ? collected.join(' ').replace(/\s+/gu, ' ').trim() : collected.join('\n').trimEnd()
+  return text === '' ? undefined : text
+}
+
+/**
+ * Collect the prompt text a preset declares, for a cache-preserving switch.
+ * @param rows - rows parsed out of `readDocument`.
+ * @returns the concatenated prompt text, empty when the preset declares none.
+ */
+function promptTextOf(rows) {
+  const parts = []
+  for (const row of rows) {
+    if (!PROMPT_ROW_MODULES.has(row.name ?? '')) continue
+    for (const key of ['prefix', 'suffix']) {
+      const text = blockScalar(row.text, key)
+      if (text !== undefined) parts.push(text)
+    }
+  }
+  return parts.join('\n\n')
+}
+
+/**
+ * Build the message a soft switch injects.
+ * @param text - the note the model should follow.
+ * @returns a frozen user message, or a plain equivalent when the factory is unavailable.
+ */
+async function buildUserMessage(text) {
+  try {
+    const llm = await import('@deepseek-ai/dsh-llm')
+    if (typeof llm.createUserMessage === 'function') {
+      return llm.createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+    }
+  }
+  catch {
+    // Keeping the switch usable matters more than which factory built the message.
+  }
+  return {
+    id: `preset-manager-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }
+}
+
+/**
+ * Switch behaviour without rebinding the preset: the prompt, the tool set and
+ * therefore the provider prefix cache all stay as they are, and the target
+ * preset's declared prompt text is appended as one model-facing note.
+ * @param ctx - the plugin context.
+ * @param agent - the calling agent.
+ * @param presetId - the requested preset id.
+ * @param roster - rows from `agentPresets.list()`.
+ * @returns what was appended, so the caller can report it.
+ * @throws Error when the preset declares no prompt text or cannot be injected.
+ */
+async function softSwitch(ctx, agent, presetId, roster) {
+  if (agent === undefined || agent === null) throw new Error('柔切需要一个会话上下文的 Agent')
+  if (typeof agent.inject !== 'function') throw new Error('这个 dsh 构建的 Agent 不支持 inject()')
+  const registry = ctx.agentPresets
+  const rows = splitRows(await readPresetDocument(registry, presetId))
+  const text = promptTextOf(rows)
+  if (text === '') {
+    throw new Error(`preset "${presetId}" 没有声明可注入的 prompt 文本，柔切用不了；请用「切换」`)
+  }
+  const row = roster.find((candidate) => candidate.id === presetId)
+  const label = row?.name === undefined ? presetId : `${row.name} (${presetId})`
+  const note = `【柔切到 ${label}】本对话的 preset 与工具集不变，下面这段纪律从现在起适用于后续所有步骤：\n\n${text}`
+  await agent.inject(await buildUserMessage(note))
+  return { preset: presetId, length: text.length }
+}
+
+/**
+ * Describe what a switch would change in the request prefix.
+ * @param ctx - the plugin context.
+ * @param from - the preset the conversation runs.
+ * @param to - the requested preset.
+ * @param roster - rows from `agentPresets.list()`.
+ * @returns a report with the row difference and a cache verdict.
+ * @throws Error when either declaration cannot be read.
+ */
+async function diffPresets(ctx, from, to, roster) {
+  const registry = ctx.agentPresets
+  const [fromRows, toRows] = await Promise.all([
+    from === undefined ? Promise.resolve([]) : readPresetDocument(registry, from).then(splitRows),
+    readPresetDocument(registry, to).then(splitRows),
+  ])
+  if (fromRows.length === 0 && toRows.length === 0) {
+    throw new Error('这个 dsh 构建读不到 preset 的声明（agentPresets.readDocument），无法做差异检查')
+  }
+  const delta = diffRows(fromRows, toRows)
+  const nameOf = (id) => {
+    const row = roster.find((candidate) => candidate.id === id)
+    return row?.name === undefined ? id : `${row.name} (${id})`
+  }
+  const cacheSafe = delta.added.length === 0 && delta.removed.length === 0 && delta.changed.length === 0
+  return {
+    from,
+    to,
+    fromLabel: from === undefined ? '(未记录)' : nameOf(from),
+    toLabel: nameOf(to),
+    added: delta.added,
+    removed: delta.removed,
+    changed: delta.changed,
+    cacheSafe,
+  }
+}
+
+/**
+ * Render a diff report as lines a user or the model can read.
+ * @param report - output of {@link diffPresets}.
+ * @returns the rendered report.
+ */
+function formatDiff(report) {
+  const describe = (row) => `${row.id ?? '(无 id)'}${row.name === undefined ? '' : ` — ${row.name}`}`
+  const lines = [`从 ${report.fromLabel} 到 ${report.toLabel}：`]
+  if (report.added.length > 0) lines.push(`+ 新增 ${report.added.length} 行：${report.added.map(describe).join('、')}`)
+  if (report.removed.length > 0) lines.push(`- 删除 ${report.removed.length} 行：${report.removed.map(describe).join('、')}`)
+  if (report.changed.length > 0) lines.push(`~ 配置改动 ${report.changed.length} 行：${report.changed.map(describe).join('、')}`)
+  lines.push(report.cacheSafe
+    ? '结论：两套组合声明一致，切换不会改动请求前缀，前缀缓存可以保留。'
+    : '结论：请求前缀会变（system prompt 与工具集按声明重新组装），下一轮的前缀缓存将从头计算；要保留缓存请用「柔切」。')
+  return lines.join('\n')
 }
 
 /**
@@ -336,24 +584,33 @@ function switchTool(ctx) {
       required: ['preset'],
       properties: {
         preset: { type: 'string', description: 'Exact preset id from preset_list.' },
+        mode: {
+          type: 'string',
+          enum: ['hard', 'soft'],
+          description: 'hard rebinds the composition (prompt and tools change, prefix cache resets); soft appends the preset\'s prompt text and keeps both.',
+        },
       },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        required: ['changed', 'to'],
+        required: ['changed', 'to', 'mode'],
         properties: {
-          changed: { type: 'boolean', description: 'False when the conversation already ran that preset.' },
-          from: { type: 'string', description: 'Preset the conversation ran before the switch.' },
-          to: { type: 'string', description: 'Preset the conversation runs now.' },
+          changed: { type: 'boolean', description: 'False for a soft switch and when the conversation already ran that preset.' },
+          mode: { type: 'string', enum: ['hard', 'soft'] },
+          from: { type: 'string', description: 'Preset the conversation ran before the call.' },
+          to: { type: 'string', description: 'Preset that was requested.' },
+          note: { type: 'string', description: 'What a soft switch appended.' },
         },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: value.changed
-          ? `Agent preset switched to "${value.to}"${value.from === undefined ? '' : ` from "${value.from}"`}; the new composition applies from the next step.`
-          : `The conversation already runs "${value.to}"; nothing changed.`,
+        text: value.mode === 'soft'
+          ? `Soft-switched to "${value.to}": its prompt text was appended as one note (${value.note ?? 'text'}), the composition and the prefix cache are unchanged.`
+          : value.changed
+            ? `Agent preset switched to "${value.to}"${value.from === undefined ? '' : ` from "${value.from}"`}; the new composition applies from the next step.`
+            : `The conversation already runs "${value.to}"; nothing changed.`,
       }],
     },
     async execute(args, exec) {
@@ -361,13 +618,100 @@ function switchTool(ctx) {
       if (typeof presetId !== 'string' || presetId.trim() === '') {
         throw new Error('preset must be a non-empty string')
       }
+      const mode = args.mode ?? 'hard'
+      if (mode !== 'hard' && mode !== 'soft') throw new Error('mode must be "hard" or "soft"')
       // A tool call always runs inside a turn, so the command's busy guard does
       // not apply: the rebind is picked up by the next step of this same turn.
+      const roster = await ctx.agentPresets.list()
+      const from = currentPresetOf(ctx.agentPresets, exec.agent)
+      if (mode === 'soft') {
+        const done = await softSwitch(ctx, exec.agent, presetId.trim(), roster)
+        return {
+          changed: false,
+          mode,
+          to: done.preset,
+          ...from === undefined ? {} : { from },
+          note: `${done.length} characters of prompt text`,
+        }
+      }
       const result = await switchPreset(ctx, exec.agent, presetId.trim())
       return {
         changed: result.changed,
+        mode,
         ...result.from === undefined ? {} : { from: result.from },
         to: result.to,
+      }
+    },
+  }
+}
+
+/**
+ * The `preset_diff` tool definition.
+ * @param ctx - the plugin context.
+ * @returns a registry-ready tool definition.
+ */
+function diffTool(ctx) {
+  const rows = {
+    type: 'array',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+      },
+    },
+  }
+  return {
+    name: 'preset_diff',
+    description: DIFF_TOOL_DESCRIPTION,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['preset'],
+      properties: {
+        preset: { type: 'string', description: 'Exact preset id to compare against the running one.' },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['to', 'cacheSafe'],
+        properties: {
+          from: { type: 'string' },
+          to: { type: 'string' },
+          cacheSafe: { type: 'boolean', description: 'True when the declared rows are identical, so the request prefix is unchanged.' },
+          added: rows,
+          removed: rows,
+          changed: rows,
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.cacheSafe
+          ? `"${value.to}" declares the same rows as the running preset; a switch keeps the request prefix, so the cache is safe.`
+          : `Switching to "${value.to}" changes the request prefix: +${value.added?.length ?? 0} rows, -${value.removed?.length ?? 0} rows, ~${value.changed?.length ?? 0} rows. The prefix cache resets; use preset_switch mode "soft" to keep it.`,
+      }],
+    },
+    async execute(args, exec) {
+      const presetId = args.preset
+      if (typeof presetId !== 'string' || presetId.trim() === '') {
+        throw new Error('preset must be a non-empty string')
+      }
+      const roster = await ctx.agentPresets.list()
+      const report = await diffPresets(ctx, currentPresetOf(ctx.agentPresets, exec.agent), presetId.trim(), roster)
+      const simplify = (list) => list.map((row) => ({
+        ...row.id === undefined ? {} : { id: row.id },
+        ...row.name === undefined ? {} : { name: row.name },
+      }))
+      return {
+        ...report.from === undefined ? {} : { from: report.from },
+        to: report.to,
+        cacheSafe: report.cacheSafe,
+        added: simplify(report.added),
+        removed: simplify(report.removed),
+        changed: simplify(report.changed),
       }
     },
   }
@@ -386,11 +730,12 @@ export function apply(ctx, config) {
   ctx.commands.register({
     name: options.command,
     description: COMMAND_DESCRIPTION,
-    input: { hint: `<preset id> | list` },
+    input: { hint: '<preset id> | soft <preset id> | diff <preset id> | list' },
     handler: (invocation) => runCommand(ctx, options, invocation),
   })
 
   if (options.tools === false) return
   ctx.tools.register(listTool(ctx))
   ctx.tools.register(switchTool(ctx))
+  ctx.tools.register(diffTool(ctx))
 }

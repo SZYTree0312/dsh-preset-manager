@@ -1,32 +1,43 @@
 {
-  "name": "dsh-opencode-free",
+  "name": "dsh-preset-manager",
   "version": "0.1.0",
-  "type": "module",
-  "description": "星桥模式：OpenCode 免费模型路线的前缀稳定与载荷控制 Agent 预设",
+  "description": "DeepSeek Harness plugin: list the profile's agent presets and switch a running conversation to another one. | DSH 插件：列出 profile 的 Agent preset，并在对话内切换当前会话的 preset。",
   "keywords": [
     "deepseek-harness",
     "dsh",
     "dsh-plugin",
+    "cordis",
     "agent-preset",
-    "opencode",
-    "opencode-free",
-    "xdbridge",
-    "prefix-cache"
+    "preset",
+    "preset-switch"
   ],
   "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
   "files": [
-    "presets",
-    "docs",
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
     "README.md",
     "LICENSE"
   ],
-  "meta": {
-    "title": "星桥模式",
-    "description": "OpenCode 免费模型路线（经 dsh-opencode-xdbridge）的前缀稳定预设。这条路线不花钱，硬约束是速率限制、每轮延迟与 8 MB 请求体上限：工具目录全程固定、历史只追加、载荷尽量小、压缩尽量不触发。"
-  },
   "dsh": {
     "bundle": {
-      "patch": "./presets/opencode-free.patch.yml"
+      "patch": "./cordis.patch.yml"
     }
+  },
+  "engines": {
+    "node": "^22.15.0 || >=24.0.0"
+  },
+  "scripts": {
+    "check": "node --check index.js",
+    "test": "node test/plugin.test.mjs"
   }
 }

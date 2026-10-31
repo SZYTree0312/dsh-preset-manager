@@ -1,0 +1,10 @@
+# dsh-preset-manager bundle 层：插入 preset 管理器插件行。
+# 顶层 `- insert` 只新增行；要覆盖同一行请改成 `- id: dsh-preset-manager` + `config`
+#（覆盖会替换整个 config，必须重述每个键）。
+- insert:
+    - id: dsh-preset-manager
+      name: 'dsh-preset-manager'
+      config:
+        command: preset
+        tools: true
+        allowWhileBusy: false

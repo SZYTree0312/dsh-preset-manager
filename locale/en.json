@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Preset Manager",
+    "description": "Lists the profile's Agent presets and switches the current conversation to another one."
+  }
+}

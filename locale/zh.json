@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Preset 管理器",
+    "description": "在对话内列出本 profile 的 Agent preset，并把当前会话切换到另一个 preset。"
+  }
+}

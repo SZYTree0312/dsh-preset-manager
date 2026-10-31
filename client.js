@@ -106,6 +106,8 @@ window.__ModuleLoader__.load({
     function PresetSwitcher(props) {
       const { sessionId, useSessions, remote } = props
       const t = TEXT_TABLE
+      // A slot that does not hand out a session store cannot support a switch.
+      if (typeof useSessions !== 'function') return null
       const current = useSessions((state) => {
         if (state === undefined || state.byId === undefined) return undefined
         const entry = state.byId[sessionId]
@@ -289,11 +291,15 @@ window.__ModuleLoader__.load({
         if (typeof ctx.effect === 'function') ctx.effect(installStyles)
         else installStyles()
 
+        const remote = ctx.remote !== undefined
+          ? ctx.remote
+          : typeof ctx.get === 'function' ? ctx.get('remote') : undefined
+
         ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
           name: 'conversation.session.header.actions',
           id: 'preset-manager',
           order: 5,
-          inject: () => ({ remote: ctx.remote }),
+          inject: () => ({ remote }),
         }, PresetSwitcher))
       },
     }

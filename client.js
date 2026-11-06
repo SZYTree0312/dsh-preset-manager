@@ -15,6 +15,14 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
+    // The header slot clips overflow, so the menu must render outside it.
+    let createPortal
+    try {
+      const reactDom = require('react-dom')
+      createPortal = typeof reactDom.createPortal === 'function' ? reactDom.createPortal : undefined
+    } catch (error) {
+      createPortal = undefined
+    }
 
     const TEXT = {
       zh: {
@@ -252,6 +260,19 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'dpm-notice' }, t.empty)
             : menuRows
 
+      const menu = open && place !== undefined
+        ? h('div', {
+          className: 'dpm-menu',
+          id: 'dpm-menu',
+          role: 'menu',
+          style: { top: place.top + 'px', right: place.right + 'px' },
+        },
+          h('div', { className: 'dpm-title' }, t.title),
+          body,
+          notice === undefined ? null : h('div', { className: 'dpm-notice', 'data-kind': notice.kind }, notice.text),
+        )
+        : null
+
       return h('span', { className: 'dpm-wrap', ref: anchor },
         h('button', {
           type: 'button',
@@ -264,23 +285,16 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dpm-label' }, triggerText),
           h('span', { className: 'dpm-caret', 'aria-hidden': 'true' }, '▼'),
         ),
-        open && place !== undefined
-          ? h('div', {
-            className: 'dpm-menu',
-            id: 'dpm-menu',
-            role: 'menu',
-            style: { top: place.top + 'px', right: place.right + 'px' },
-          },
-            h('div', { className: 'dpm-title' }, t.title),
-            body,
-            notice === undefined ? null : h('div', { className: 'dpm-notice', 'data-kind': notice.kind }, notice.text),
-          )
-          : null,
+        menu !== null && createPortal !== undefined && typeof document !== 'undefined'
+          ? createPortal(menu, document.body)
+          : menu,
       )
     }
 
     return {
-      inject: ['slots'],
+      // cordis 4 rejects any ctx.<name> read that the fiber did not declare,
+      // and a Remote namespace counts as its own service ("remote.<ns>").
+      inject: ['slots', 'remote', 'remote.agentPresets', 'remote.commands'],
       apply(ctx) {
         const installStyles = () => {
           const tag = ensureStyles()
@@ -291,9 +305,12 @@ window.__ModuleLoader__.load({
         if (typeof ctx.effect === 'function') ctx.effect(installStyles)
         else installStyles()
 
-        const remote = ctx.remote !== undefined
-          ? ctx.remote
-          : typeof ctx.get === 'function' ? ctx.get('remote') : undefined
+        let remote
+        try {
+          remote = typeof ctx.get === 'function' ? ctx.get('remote') : ctx.remote
+        } catch (error) {
+          remote = undefined
+        }
 
         ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
           name: 'conversation.session.header.actions',
